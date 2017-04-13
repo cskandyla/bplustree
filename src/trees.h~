@@ -1,5 +1,0 @@
-void Tree_Create(void *tree_root,enum tree_type tt,unsigned int a,unsigned int b);
-int  Tree_Insert(void *tree_root,enum tree_type tt,unsigned long long data); 
-int  Tree_Delete(void *tree_root,enum tree_type tt,unsigned long long data); 
-int  Tree_Search(void *tree_root,enum tree_type tt,unsigned long long data);
-
