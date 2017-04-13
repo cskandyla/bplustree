@@ -1,0 +1,5 @@
+
+#ifndef __COMMON__H
+#define __COMMON__H
+enum Node_Type{INNER=0,LEAF};
+#endif

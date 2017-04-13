@@ -1,0 +1,48 @@
+#ifndef __WBP_TREE__
+#define __WBP_TREE__
+
+
+struct WBPTree
+{
+  unsigned int B;
+  unsigned long num_inodes;
+  unsigned long num_leaves;
+  unsigned long max_height;
+  struct WBPT_INode *root;
+  
+};
+
+
+
+struct WBPT_INode
+{
+  unsigned long size;
+  unsigned long node_id;
+  unsigned long long *dividers;
+  void *child_nodes;
+  unsigned int weight;
+
+};
+  
+
+struct WBPT_Leaf
+{
+  unsigned long size;
+  unsigned long node_id;
+  unsigned long long *real_data;
+  unsigned long next_node_id;
+  
+};
+
+
+
+void WBP_Tree_Create(struct WBPTree *tree,unsigned int B);
+int  WBP_Tree_Insert(struct WBPTree *tree,unsigned long long data); 
+int  WBP_Tree_Delete(struct WBPTree *tree,unsigned long long data); 
+int  WBP_Tree_Search(struct WBPTree *tree,unsigned long long data);
+
+//INNER FUNCTIONS NOT TO BE USED OUTSIDE OF THE FILE SCOPE
+struct WBPT_INode* WBPT_CreateInnerNode(unsigned long size,unsigned long node_id);
+struct WBPT_Leaf* WBPT_CreateLeafNode(unsigned long node_id,unsigned long next_node_id,unsigned long size);
+
+#endif
