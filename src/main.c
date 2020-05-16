@@ -11,10 +11,10 @@ void shuffle(int *array, int array_size, int shuff_size)
 {   
   if (array_size > 1)  
     {   
-      int i;
+      size_t i;
       for (i = 0; i < shuff_size - 1; i++) 
 	{   
-	  int j = i + rand() / (RAND_MAX / (array_size - i) + 1); 
+	  size_t j = i + rand() / (RAND_MAX / (array_size - i) + 1); 
 	  int t = array[j];
 	  array[j] = array[i];
 	  array[i] = t;
@@ -79,7 +79,7 @@ void Insert_foo(struct ab_tree *tree,struct foo *fooz)
 }
 void build_foo(struct ab_tree *tree,int max)
 {
-  int arr[max];
+    int *arr=malloc(max*sizeof(int));
   for(int i=0;i<max;i++)
     {
       arr[i]=i;
@@ -295,29 +295,31 @@ struct record_t* search_int_ptr(struct ab_tree *tree,int value)
   return ret;
 }
 
-int build(struct ab_tree *tree,int max)
+int build(struct ab_tree *tree,size_t max)
 {
-  int arr[max];
-  for(int i=0;i<max;i++)
-    {
-      arr[i]=i;
-    }
   
-  shuffle(arr,max-1,max-1);
-  for(int i=0;i<max;i++)
-   {
-     //insert_int(tree,i,i);
-     char string[20];
-     sprintf(string,"Value%d",i);
-     generic_insert(tree,string,20,&i,sizeof(int));
-      printf("Inserting:%d\r",i);
+    int *arr=malloc(max*sizeof(int));
+    for(int i=0;i<max;i++)
+    {
+	arr[i]=(int)i;
     }
-  printf("\n");
+    
+    shuffle(arr,max-1,max-1);
+    for(int i=0;i<max;i++)
+    {
+	//insert_int(tree,i,i);
+	char string[20];
+	sprintf(string,"Value%d",i);
+	generic_insert(tree,string,20,&i,sizeof(int));
+	printf("Inserting:%d\r",arr[i]);
+    }
+    printf("\n");
+    free(arr);
 }
 
 int deletion_test(struct ab_tree *tree,int max)
 {
-  int arr[max];
+  int *arr=malloc(max*sizeof(int));
   for(int i=0;i<max;i++)
     {
       arr[i]=i;
@@ -331,7 +333,7 @@ int deletion_test(struct ab_tree *tree,int max)
       printf("Deleting:%d\r",i);
     }
   printf("\n");
-
+  free(arr);
 }
 
 int validate(struct ab_tree *tree,int max)
@@ -360,22 +362,12 @@ int main(int argc, char *argv[])
   srand(time(NULL));
   struct ab_tree tree;
   struct ab_tree_traits tree_traits;
-  tree_traits.dealloc=free_foo;
-  tree_traits.compare=str_compare;
-  tree_traits.alloc=AB_Default_Alloc;
-  AB_Create(&tree,2,5,tree_traits);
-  int num_runs=100;
-  int max=250000;
-  for(int i=0;i<num_runs;i++)
-    {
-      printf("Round %d\n",i);
-      build_foo(&tree,max);
-      validate_foo(&tree,max);
-      deletion_test_str(&tree,max);
-    }
-	    //TraverseTree(&tree,foo_desc);
-    AB_Destroy(&tree);
-  
+  AB_Create(&tree,2,5,AB_Default_Traits(int_compare),"tree");
+  int max=1000000;
+  build(&tree,max);
+  validate(&tree,max);
+  deletion_test(&tree,max);
+  AB_Destroy(&tree);
   return 0;
 }
 

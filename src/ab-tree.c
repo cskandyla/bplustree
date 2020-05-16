@@ -11,11 +11,32 @@ struct record_t AB_Default_Alloc(void *value)
 
 void AB_Default_Dealloc(struct record_t rec)
 {
-  //just asuming flat data structures and freeing
+  //assuming flat data structures passs another function to tree traits
   free(rec.value.data);
   free(rec.key.data);
 }
 
+void AB_Default_Serialize(struct record_t rec,FILE *fp)
+{
+  //Assuming flat structures we just have to fwrite
+  fwrite(&rec.key.size,sizeof(int),1,fp);
+  fwrite(&rec.value.size,sizeof(int),1,fp);
+  fwrite(rec.key.data,rec.key.size,1,fp);
+  fwrite(rec.value.data,rec.value.size,1,fp);
+}
+
+struct record_t AB_Default_Load(FILE *fp)
+{
+  //Assuming flat structures again so we just malloc and fread
+  struct record_t record;
+  fread(&record.key.size,sizeof(int),1,fp);
+  fread(&record.value.size,sizeof(int),1,fp);
+  record.key.data=malloc(record.key.size);
+  fread(record.key.data,record.key.size,1,fp);
+  record.value.data=malloc(record.value.size);
+  fread(record.value.data,record.value.size,1,fp);
+  return record;
+}
 
 //At the very least a comparison function for keys has to be provided
 struct ab_tree_traits AB_Default_Traits(data_compare compare)
@@ -23,18 +44,25 @@ struct ab_tree_traits AB_Default_Traits(data_compare compare)
   struct ab_tree_traits tree_traits;
   tree_traits.dealloc=AB_Default_Dealloc;
   tree_traits.alloc=AB_Default_Alloc;
+  tree_traits.store=AB_Default_Serialize;
+  tree_traits.load=AB_Default_Load;
   tree_traits.compare=compare;
   return tree_traits;
 }
 
-int AB_Create(struct ab_tree *tree,unsigned int a,unsigned int b,struct ab_tree_traits traits)
+
+
+int AB_Create(struct ab_tree *tree,unsigned int a,unsigned int b,struct ab_tree_traits traits,char *filename)
 {
   tree->a=a;
   tree->b=b;
   tree->num_inner_nodes=0;
   tree->num_leaves=0;
   tree->traits=traits;
-  //Set Comparison Function
+  tree->tree_file=fopen(filename,"w+");
+  //lets hold b*b leaves in memory
+  lru_init(&tree->lru,b*b);
+  hash_queue_init(&tree->disk_queue);
   //Create and Set Root
   struct ab_inner_node *root=AB_Inner_Node_Create(tree);
   tree->root=root;
@@ -44,6 +72,8 @@ int AB_Create(struct ab_tree *tree,unsigned int a,unsigned int b,struct ab_tree_
 void AB_Destroy(struct ab_tree *tree)
 {
   AB_Node_Destroy(tree,tree->root);
+  fclose(tree->tree_file);
+  lru_destroy(&tree->lru);
 }
 
 
@@ -52,7 +82,7 @@ struct ab_inner_node* AB_Inner_Node_Create(struct ab_tree *tree)
 {
   //Allocate memory for the node and its children and keys
   struct ab_inner_node *tree_node=malloc(sizeof(struct ab_inner_node));
-  tree_node->children=malloc(sizeof(struct magic_id)*tree->b);
+  tree_node->children=malloc(sizeof(struct ab_node_meta_t)*tree->b);//1
   tree_node->keys=malloc(sizeof(struct data_t)*(tree->b-1));
   tree_node->parent=NULL;
   //We added a new node update tree info
@@ -99,17 +129,14 @@ void AB_Node_Destroy(struct ab_tree *tree,struct ab_inner_node *tn)
   free(tn);
   
   tree->num_inner_nodes--;
-  
 }
 
 void AB_Leaf_Destroy(struct ab_tree *tree,struct ab_leaf *tl)
 {
-  
   for(int i=0;i<tl->length;i++)
     {
       tree->traits.dealloc(tl->data[i]);
     }
-
   AB_Leaf_Free(tl);
   free(tl);
   tree->num_leaves--;
@@ -141,7 +168,7 @@ struct ab_inner_node* AB_Split_Node(struct ab_tree *tree,struct ab_inner_node *t
       else
 	((struct ab_leaf*)tn->children[i].address)->parent=nn;;
       //copy children over
-      memcpy(&nn->children[j],&tn->children[i],sizeof(struct magic_id));
+      memcpy(&nn->children[j],&tn->children[i],sizeof(struct ab_node_meta_t));//2
       //copy keys over
       if(i!=tn->length-1 )
 	memcpy(&nn->keys[j],&tn->keys[i],sizeof(struct data_t));
@@ -162,8 +189,6 @@ struct ab_leaf* AB_Split_Leaf(struct ab_tree *tree,struct ab_leaf *tl)
   int j=0;
   for(int i=tl->length/2;i<tl->length;i++)
     {
-      //      nl->data[j].data=tl->data[i].data;
-      //nl->data[j].size=tl->data[i].size;
       memcpy(&nl->data[j],&tl->data[i],sizeof(struct record_t));
       j++;
     }
@@ -192,6 +217,7 @@ struct record_t* AB_Node_Search(struct ab_tree *tree,struct ab_inner_node *tn,st
 	  break;
 	}
     }
+  //i should point to the correct node 
   if(tn->children[i].n_t==LEAF)
     {
       return AB_Leaf_Search(tree,tn->children[i].address,data);
@@ -214,6 +240,7 @@ struct record_t* AB_Leaf_Search(struct ab_tree *tree,struct ab_leaf *tl,struct d
 	  return &tl->data[i];
 	}
     }
+  //we found nothing
   return NULL;
 }
 
@@ -267,6 +294,8 @@ int AB_Inner_Insert(struct ab_tree *tree,struct ab_inner_node *tn,struct ab_inne
   
   if(tn->children[i].n_t==LEAF)
     {
+      
+      //grab leaf here and handle any blocks that need to written to disk.
       AB_Leaf_Insert(tree,tn->children[i].address,tn,data,i);
     }
   else if(tn->children[i].n_t==INNER)
@@ -294,12 +323,12 @@ int AB_Node_Insert(struct ab_tree *tree,struct ab_inner_node *tn,enum Node_Type 
     {
       //Split the node  
       struct data_t new_key;
-      //key to move one level up after the split
+      //key to move up one level after the split
       memcpy(&new_key,&tn->keys[tn->length/2],sizeof(struct data_t));
       
       struct ab_inner_node* nn=AB_Split_Node(tree,tn);
       
-      //if we are the root well create a new one 
+      //if we are the root, well we cant split, create a new one 
       if(tn->parent==NULL)
 	{
 	  //Create a new root;
@@ -325,7 +354,7 @@ int AB_Node_Insert(struct ab_tree *tree,struct ab_inner_node *tn,enum Node_Type 
       //We're not the root
       else
 	{
-	  //Update the parent insert the new node and key
+	  //Update the parent: insert the new node and key
 	  AB_Node_Insert(tree,tn->parent,INNER,nn,new_key);
 	}
     }
@@ -342,6 +371,7 @@ int AB_Leaf_Insert(struct ab_tree *tree,struct ab_leaf *tl,struct ab_inner_node 
       key.data=malloc(nl->data[0].key.size);
       key.size=nl->data[0].key.size;
       memcpy(key.data,nl->data[0].key.data,nl->data[0].key.size);
+      //insert the tree to our parent
       AB_Node_Insert(tree,tl->parent,LEAF,nl,key);
     }
 }
@@ -357,10 +387,10 @@ int AB_Place_Node(struct ab_tree *tree,struct ab_inner_node *tn,struct ab_inner_
 	  break;
 	}
     }
-  //Shift ellements to accomodate new node 
+  //shift ellements to accomodate new node 
   for(int pos=tn->length;pos>i;pos--)
     {
-      memcpy(&tn->children[pos],&tn->children[pos-1],sizeof(struct magic_id));
+      memcpy(&tn->children[pos],&tn->children[pos-1],sizeof(struct ab_node_meta_t));//3
       if(pos!=tn->length)
 	memcpy(&tn->keys[pos],&tn->keys[pos-1],sizeof(struct data_t));
     }
@@ -369,7 +399,7 @@ int AB_Place_Node(struct ab_tree *tree,struct ab_inner_node *tn,struct ab_inner_
   tn->children[i+1].block_id=nn->BID;
   tn->children[i+1].n_t=INNER;
   tn->children[i+1].r_d=RAM;
-  //Update key
+  //update key
   memcpy(&tn->keys[i],&key,sizeof(struct data_t));
   tn->length++;
   return i;
@@ -385,10 +415,10 @@ int AB_Place_Leaf(struct ab_tree *tree,struct ab_inner_node *tn,struct ab_leaf *
 	  break;
 	}
     }
-  //Shift elements to accomodate new leaf
+  //shift elements to accomodate new leaf
   for(int pos=tn->length;pos>i;pos--)
     {
-      memcpy(&tn->children[pos],&tn->children[pos-1],sizeof(struct magic_id));
+      memcpy(&tn->children[pos],&tn->children[pos-1],sizeof(struct ab_node_meta_t));//4
       if(pos!=tn->length)
 	memcpy(&tn->keys[pos],&tn->keys[pos-1],sizeof(struct data_t));
     }
@@ -397,7 +427,7 @@ int AB_Place_Leaf(struct ab_tree *tree,struct ab_inner_node *tn,struct ab_leaf *
   tn->children[i+1].block_id=tl->BID;
   tn->children[i+1].n_t=LEAF;
   tn->children[i+1].r_d=RAM;
-  //Update key make a new copy malloc memory for it and copy int
+  //update: make a new copy malloc memory for it and copy int
   tn->keys[i].data=malloc(tl->data[0].key.size);
   tn->keys[i].size=tl->data[0].key.size;
   memcpy(tn->keys[i].data,tl->data[0].key.data,tl->data[0].key.size);
@@ -488,7 +518,7 @@ int AB_Node_Delete(struct ab_tree *tree,struct ab_inner_node *tn,int pos)
 	  struct ab_inner_node *merged=NULL;
 	  struct data_t merge_key;
 
-	  //find the left node //we have to load to check the length hmm maybe transfer info to the parent
+	  //find the left node //we might have to load from disk to check the length hmm maybe transfer info to the parent
 	  if( index-1>=0 && (tn->length+((struct ab_inner_node*)tn->parent->children[index-1].address)->length)<=tree->b)
 	    { 
 	      //printf("Merging with left node index:%d\n",index);
@@ -499,8 +529,6 @@ int AB_Node_Delete(struct ab_tree *tree,struct ab_inner_node *tn,int pos)
 	      merged=AB_Merge_Node(left,tn,merge_key);
 	      AB_Node_Delete(tree,tn->parent,index-1);
 	      free(addr);
-	      //removing index
-	      
 	    }
 	  //find the right node
 	  else if(index+1<tn->parent->length && (tn->length+((struct ab_inner_node*)tn->parent->children[index+1].address)->length)<=tree->b)
@@ -516,7 +544,7 @@ int AB_Node_Delete(struct ab_tree *tree,struct ab_inner_node *tn,int pos)
 	      free(addr);
 
 	    } 
-	  //We need to split again:)
+	  //We need to split again :-)
 	  if(merged!=NULL && merged->length==tree->b)
 	    {	
 	      
@@ -550,6 +578,7 @@ int AB_Leaf_Delete(struct ab_tree *tree,struct ab_leaf *tl,struct ab_inner_node 
 	  //left leaf is index -1 // store the length in parent?
 	  if( index-1>=0 && (tl->length+((struct ab_leaf*)tl->parent->children[index-1].address)->length)<=tree->b)
 	    {
+	      //grab the leaf
 	      struct ab_leaf *left=tl->parent->children[index-1].address;
 	      //We have  to delete the inbetween key
 	      void *addr=tl->parent->keys[index-1].data;
@@ -599,7 +628,7 @@ int AB_Remove_Node(struct ab_inner_node *tn,int pos)
   free(tn->children[pos].address);
    for(int i=pos;i<tn->length-1;i++)
     {
-      memcpy(&tn->children[i],&tn->children[i+1],sizeof(struct magic_id));
+      memcpy(&tn->children[i],&tn->children[i+1],sizeof(struct ab_node_meta_t));//5
       if(i!=tn->length-2)
 	{
 	  memcpy(&tn->keys[i],&tn->keys[i+1],sizeof(struct data_t));
@@ -615,7 +644,7 @@ int AB_Remove_Leaf(struct ab_inner_node *tn,int pos)
 
   for(int i=pos;i<tn->length-1;i++)
     {
-      memcpy(&tn->children[i],&tn->children[i+1],sizeof(struct magic_id));
+      memcpy(&tn->children[i],&tn->children[i+1],sizeof(struct ab_node_meta_t));//6
       if(i!=tn->length-2)
 	memcpy(&tn->keys[i],&tn->keys[i+1],sizeof(struct data_t));
     }
@@ -631,7 +660,7 @@ int AB_Remove_Data(struct ab_tree *tree,struct ab_leaf *tl,struct data_t data)
     {
       if(tree->traits.compare(&data,&tl->data[i].key)==0)
 	{
-	  //let the caller deallocate return a pointer to the record 	  
+	  //let the caller deallocate they hold a pointer to the record 	  
 	  tree->traits.dealloc(tl->data[i]);
 	  break;
 	}
@@ -672,7 +701,7 @@ struct ab_inner_node* AB_Merge_Node(struct ab_inner_node *left,struct ab_inner_n
   
   for(int i=right->length-1;i>=0;i--)
     {      
-      memcpy(&right->children[left->length+i],&right->children[i],sizeof(struct magic_id));
+      memcpy(&right->children[left->length+i],&right->children[i],sizeof(struct ab_node_meta_t));//7
       if(i!=right->length-1)
 	{
 	  
@@ -691,7 +720,7 @@ struct ab_inner_node* AB_Merge_Node(struct ab_inner_node *left,struct ab_inner_n
 	  ((struct ab_inner_node*)left->children[i].address)->parent=right;
 	}
 
-      memcpy(&right->children[i],&left->children[i],sizeof(struct magic_id));
+      memcpy(&right->children[i],&left->children[i],sizeof(struct ab_node_meta_t));//8
       if(i!=left->length-1)
 	{
 	  
@@ -706,7 +735,59 @@ struct ab_inner_node* AB_Merge_Node(struct ab_inner_node *left,struct ab_inner_n
   return right;
 }
 
-void print_leaf_stats(struct ab_leaf *tl,data_describe data_desc)
+struct ab_leaf* AB_Leaf_Load(struct ab_tree *tree,struct ab_inner_node *parent,int pos)
+{
+  //we probably need a larger addressing space than long 
+  pos=0;
+  fseek(tree->tree_file,0,SEEK_SET);
+  struct ab_leaf *leaf=malloc(sizeof(struct ab_leaf));
+  fread(&leaf->BID,sizeof(int),1,tree->tree_file);
+  fread(&leaf->length,sizeof(int),1,tree->tree_file);
+  leaf->data=malloc(sizeof(struct record_t)*tree->b);
+  leaf->parent=parent;  
+  
+  for(int i=0;i<leaf->length;i++)
+    {
+      leaf->data[i]=tree->traits.load(tree->tree_file);
+    }
+  return leaf;
+}
+
+void AB_Leaf_Store(struct ab_tree *tree,struct ab_leaf *leaf)
+{
+  //long *next_disk_write=hash_queue_pop_front(tree->disk_queue);
+  fseek(tree->tree_file,tree->next_disk_write,SEEK_SET);
+  fwrite(&leaf->BID,sizeof(int),1,tree->tree_file);
+  fwrite(&leaf->length,sizeof(int),1,tree->tree_file);
+  for(int i=0;i<leaf->length;i++)
+    {
+      tree->traits.store(leaf->data[i],tree->tree_file);
+    }
+  //next place to write a block unless a delete happens
+  tree->next_disk_write=ftell(tree->tree_file);
+  //
+}
+
+
+struct ab_leaf* AB_Leaf_Grab(struct ab_tree *tree,struct ab_inner_node *parent,int pos)
+{
+  size_t len;
+  struct ab_leaf* leaf=lru_get(&tree->lru,&parent->children[pos].block_id,sizeof(int),&len);
+  //if tree lru returns non-null the leaf is contained in our lru so we just return it
+  if(!leaf)
+    {
+      //not in the lru load it and add it to the lru then return it
+      leaf=AB_Leaf_Load(tree,parent,pos);
+      struct ab_leaf *leaf_out=lru_add(&tree->lru,&leaf->BID,sizeof(unsigned int),leaf,sizeof(struct ab_leaf));
+      //if a leaf was evicted, write it to disk
+      if(leaf_out)
+	AB_Leaf_Store(tree,leaf_out);
+    }
+  return leaf;
+}
+
+
+void  print_leaf_stats(struct ab_leaf *tl,data_describe data_desc)
 {
   printf("Node Address: %p\n",tl);
   printf( "Node Block ID: %zu\n",tl->BID);
