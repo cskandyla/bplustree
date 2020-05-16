@@ -1,3 +1,4 @@
+#define _DEFAULT_SOURCE
 #include "hashtable.h"
 #include <string.h>
 #include <endian.h>
